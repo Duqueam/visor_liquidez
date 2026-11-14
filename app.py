@@ -109,7 +109,7 @@ app.layout = html.Div(style=dict(backgroundColor='#0b0e14', color='#e6edf3', fon
         style=dict(height='74vh'),
         config=dict(scrollZoom=True, displayModeBar=True)
     ),
-    dcc.Interval(id='intervalo-actualizacion', interval=4000, n_intervals=0)
+    dcc.Interval(id='intervalo-actualizacion', interval=6000, n_intervals=0)
 ))
 
 def fmt_coinglass(valor):
@@ -315,9 +315,9 @@ app.clientside_callback(
     """
     function(datos, figActual) {
         if (!datos) return window.dash_clientside.no_update;
-        if (datos.error) {
-            return {data: new Array(), layout: {template: 'plotly_dark', title: 'Error: ' + datos.error}};
-        }
+       if (datos.error) {
+    return window.dash_clientside.no_update;
+    }
 
         if (!window.cursorTvListo) {
             window.cursorTvListo = true;
