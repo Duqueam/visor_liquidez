@@ -365,7 +365,7 @@ def obtener_datos(simbolo, temporalidad, rango_prof, modo_capa, n):
     etiqueta_rango = "Libro Completo" if rango_prof >= 1.0 else f"±{int(rango_prof * 100)}%"
 
     try:
-        clave_cache = f"{simbolo}_{intervalo}"
+        clave_cache = f"{simbolo}_{temporalidad}"
         ahora = time.time()
         if clave_cache in velas_cache and (ahora - velas_cache[clave_cache]['ts']) < 60:
             velas = velas_cache[clave_cache]['data']
@@ -375,7 +375,7 @@ def obtener_datos(simbolo, temporalidad, rango_prof, modo_capa, n):
                 try:
                     resp = requests.get(
                         f"https://{sub}/fapi/v1/klines",
-                        params=dict(symbol=simbolo, interval=intervalo, limit=200),
+                        params=dict(symbol=simbolo, interval=temporalidad, limit=200),
                         headers=headers,
                         timeout=6
                     ).json()
