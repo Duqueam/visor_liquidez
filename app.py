@@ -15,17 +15,17 @@ from dash import Dash, dcc, html, Input, Output
 PARES = ('HYPEUSDT', 'BTCUSDT', 'ETHUSDT', 'SOLUSDT')
 
 UMBRAL_BOMBA_USDT = {
-    'HYPEUSDT': 75000,
-    'BTCUSDT': 1500000,
-    'ETHUSDT': 600000,
-    'SOLUSDT': 300000
+    'HYPEUSDT': 15000,
+    'BTCUSDT': 250000,
+    'ETHUSDT': 100000,
+    'SOLUSDT': 50000
 }
 
 UMBRAL_LIQ_USDT = {
-    'HYPEUSDT': 5000,
-    'BTCUSDT': 25000,
-    'ETHUSDT': 15000,
-    'SOLUSDT': 10000
+    'HYPEUSDT': 1500,
+    'BTCUSDT': 10000,
+    'ETHUSDT': 5000,
+    'SOLUSDT': 3000
 }
 
 liquidaciones_vivo = {p: deque(maxlen=150) for p in PARES}
@@ -41,8 +41,8 @@ def iniciar_websocket_binance():
         return
     ws_iniciado = True
 
-    streams = ["!forceOrder@arr"] + [f"{p.lower()}@aggTrade" for p in PARES] + [f"{p.lower()}@depth@500ms" for p in PARES]
-    url = "wss"+"://fstream.binance.com/stream?streams="+"/".join(streams)
+    streams = ["!forceOrder@arr"] + [f"{p.lower()}@aggTrade" for p in PARES]
+    url = "wss://://binance.com" + "/".join(streams)
 
     def on_message(ws, message):
         try:
@@ -57,7 +57,7 @@ def iniciar_websocket_binance():
                     precio = float(orden.get('ap') or orden.get('p') or 0)
                     qty = float(orden.get('q') or 0)
                     usdt = precio * qty
-                    if usdt >= UMBRAL_LIQ_USDT.get(simbolo, 5000):
+                    if usdt >= UMBRAL_LIQ_USDT.get(simbolo, 1500):
                         lado = orden.get('S')
                         ts_ms = int(orden.get('T', time.time() * 1000))
                         liquidaciones_vivo[simbolo].append({
@@ -75,26 +75,26 @@ def iniciar_websocket_binance():
                     usdt = precio * qty
                     es_venta_agresiva = data.get('m', False)
                     ts_ms = int(data.get('T', time.time() * 1000))
-                    sec_actual = ts_ms // 1000
+                    ventana_3s = ts_ms // 3000
 
                     buf = buffer_trades[simbolo]
-                    if buf['sec'] != sec_actual:
-                        umbral = UMBRAL_BOMBA_USDT.get(simbolo, 100000)
+                    if buf['sec'] != ventana_3s:
+                        umbral = UMBRAL_BOMBA_USDT.get(simbolo, 25000)
                         if buf['buy_usdt'] >= umbral:
                             bombas_vivo[simbolo].append({
-                                'ts_ms': buf['sec'] * 1000,
+                                'ts_ms': buf['sec'] * 3000,
                                 'price': buf['last_price'],
                                 'usdt': buf['buy_usdt'],
                                 'tipo': 'COMPRA'
                             })
                         if buf['sell_usdt'] >= umbral:
                             bombas_vivo[simbolo].append({
-                                'ts_ms': buf['sec'] * 1000,
+                                'ts_ms': buf['sec'] * 3000,
                                 'price': buf['last_price'],
                                 'usdt': buf['sell_usdt'],
                                 'tipo': 'VENTA'
                             })
-                        buf['sec'] = sec_actual
+                        buf['sec'] = ventana_3s
                         buf['buy_usdt'] = 0.0
                         buf['sell_usdt'] = 0.0
 
@@ -103,39 +103,19 @@ def iniciar_websocket_binance():
                         buf['sell_usdt'] += usdt
                     else:
                         buf['buy_usdt'] += usdt
-            elif '@depth' in stream:
-                simbolo = data.get('s', '')
-                if simbolo in PARES:
-                    for p_str, q_str in data.get('b', []):
-                        p_f, q_f = float(p_str), float(q_str)
-                        if q_f == 0:
-                            libro_vivo[simbolo]['bids'].pop(p_f, None)
-                        else:
-                            libro_vivo[simbolo]['bids'][p_f] = q_f
-                    for p_str, q_str in data.get('a', []):
-                        p_f, q_f = float(p_str), float(q_str)
-                        if q_f == 0:
-                            libro_vivo[simbolo]['asks'].pop(p_f, None)
-                        else:
-                            libro_vivo[simbolo]['asks'][p_f] = q_f
-                        
-        except Exception:
-            pass
-
-    def on_close(ws, close_status_code, close_msg):
-        time.sleep(2)
-        iniciar_websocket_binance()
+        except Exception as e:
+            print(f"Error WS Binance: {e}")
 
     def correr():
         while True:
             try:
-                ws = websocket.WebSocketApp(url, on_message=on_message, on_close=on_close)
+                ws = websocket.WebSocketApp(url, on_message=on_message)
                 ws.run_forever(ping_interval=20, ping_timeout=10)
-            except Exception:
-                time.sleep(3)
+            except Exception as e:
+                print(f"Reconectando WS por error: {e}")
+            time.sleep(2)
 
-    hilo = threading.Thread(target=correr, daemon=True)
-    hilo.start()
+    threading.Thread(target=correr, daemon=True).start()
 
 
 # ==============================================================================
@@ -462,13 +442,14 @@ def obtener_datos(simbolo, temporalidad, rango_prof, modo_capa, n, velas, libro)
         t6_p = html.Span([f"{m_ask_precio:,.2f} ", html.Span(m_ask_vol, style=dict(fontSize='12px', color='#848e9c', fontWeight='normal'))])
         t6_s = f"{m_ask_dist:+.2f}% del precio"
 
-        # Rombos de Liquidaciones Reales capturados por WebSocket
+               # Rombos de Liquidaciones Reales capturados por WebSocket
         liq_x, liq_y, liq_colores, liq_tamanos, liq_textos = [], [], [], [], []
         t_min = str(df.time.iloc[-len(df)])
-        umbral_l = UMBRAL_LIQ_USDT.get(simbolo, 5000)
+        t_max = str(df.time.iloc[-1])
+        umbral_l = UMBRAL_LIQ_USDT.get(simbolo, 1500)
 
         for item in list(liquidaciones_vivo.get(simbolo, [])):
-            t_vela = alinear_a_vela(item['ts_ms'], temporalidad)
+            t_vela = min(alinear_a_vela(item['ts_ms'], temporalidad), t_max)
             if t_vela >= t_min:
                 usdt_liq = item['usdt']
                 p_liq = item['price']
@@ -482,10 +463,10 @@ def obtener_datos(simbolo, temporalidad, rango_prof, modo_capa, n, velas, libro)
 
         # Bombas de Volumen en tiempo real capturadas por WebSocket
         bomba_x, bomba_y, bomba_colores, bomba_tamanos, bomba_textos = [], [], [], [], []
-        umbral_b = UMBRAL_BOMBA_USDT.get(simbolo, 100000)
+        umbral_b = UMBRAL_BOMBA_USDT.get(simbolo, 15000)
 
         for b in list(bombas_vivo.get(simbolo, [])):
-            t_vela = alinear_a_vela(b['ts_ms'], temporalidad)
+            t_vela = min(alinear_a_vela(b['ts_ms'], temporalidad), t_max)
             if t_vela >= t_min:
                 usdt_b = b['usdt']
                 p_b = b['price']
@@ -494,7 +475,7 @@ def obtener_datos(simbolo, temporalidad, rango_prof, modo_capa, n, velas, libro)
                 bomba_y.append(p_b)
                 bomba_colores.append('rgba(0, 230, 118, 0.78)' if es_compra_b else 'rgba(255, 23, 68, 0.78)')
                 bomba_tamanos.append(min(max((usdt_b / umbral_b) * 16, 16), 42))
-                titulo_b = "BOMBA COMPRA AGRESIVA (1s)" if es_compra_b else "BOMBA VENTA AGRESIVA (1s)"
+                titulo_b = "BOMBA COMPRA AGRESIVA (3s)" if es_compra_b else "BOMBA VENTA AGRESIVA (3s)"
                 bomba_textos.append(f"● {titulo_b}<br>Volumen: {fmt_coinglass(usdt_b)} | Precio: {p_b:,.3f}")
 
                 # Dibujo de muros y Mapa de Liquidaciones Estimadas (10x, 25x, 50x, 100x)
