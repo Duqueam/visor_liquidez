@@ -629,9 +629,12 @@ def obtener_datos(simbolo, temporalidad, rango_prof, modo_capa, n):
         )
         return datos_fig, t1_p, t1_s, t2_tit, t2_p, t2_s, t3_tit, t3_p, t3_s, t4_tit, t4_p, estilo_t4, t5_p, t5_s, t6_p, t6_s
 
-    except Exception:
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
         from dash import no_update
         return (no_update,) * 16
+
 
 
 # ==============================================================================
