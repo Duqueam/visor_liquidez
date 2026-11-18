@@ -3,3 +3,4 @@ plotly
 pandas
 requests
 gunicorn
+websocket-client
