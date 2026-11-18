@@ -32,7 +32,8 @@ liquidaciones_vivo = {p: deque(maxlen=150) for p in PARES}
 bombas_vivo = {p: deque(maxlen=100) for p in PARES}
 buffer_trades = {p: {'sec': 0, 'buy_usdt': 0.0, 'sell_usdt': 0.0, 'last_price': 0.0} for p in PARES}
 ws_iniciado = False
-
+libro_vivo = {p: {'bids': {}, 'asks': {}} for p in PARES}
+velas_cache = {}
 
 def iniciar_websocket_binance():
     global ws_iniciado
@@ -40,7 +41,7 @@ def iniciar_websocket_binance():
         return
     ws_iniciado = True
 
-    streams = ["!forceOrder@arr"] + [f"{p.lower()}@aggTrade" for p in PARES]
+    streams = ["!forceOrder@arr"] + [f"{p.lower()}@aggTrade" for p in PARES] + [f"{p.lower()}@depth@500ms" for p in PARES]
     url = "wss"+"://fstream.binance.com/stream?streams="+"/".join(streams)
 
     def on_message(ws, message):
@@ -101,8 +102,23 @@ def iniciar_websocket_binance():
                     if es_venta_agresiva:
                         buf['sell_usdt'] += usdt
                     else:
-                        buf['buy_usdt'] += usdt
-
+                        buf['buy_usdt'] += usdt.
+            elif '@depth' in stream:
+                simbolo = data.get('s', '')
+                if simbolo in PARES:
+                    for p_str, q_str in data.get('b', []):
+                        p_f, q_f = float(p_str), float(q_str)
+                        if q_f == 0:
+                            libro_vivo[simbolo]['bids'].pop(p_f, None)
+                        else:
+                            libro_vivo[simbolo]['bids'][p_f] = q_f
+                    for p_str, q_str in data.get('a', []):
+                        p_f, q_f = float(p_str), float(q_str)
+                        if q_f == 0:
+                            libro_vivo[simbolo]['asks'].pop(p_f, None)
+                        else:
+                            libro_vivo[simbolo]['asks'][p_f] = q_f
+                        
         except Exception:
             pass
 
@@ -349,15 +365,29 @@ def obtener_datos(simbolo, temporalidad, rango_prof, modo_capa, n):
     etiqueta_rango = "Libro Completo" if rango_prof >= 1.0 else f"±{int(rango_prof * 100)}%"
 
     try:
-        base = "https://" + "fapi.binance.com"
-        velas = requests.get(
-            base + "/fapi/v1/klines",
-            params=dict(symbol=simbolo, interval=temporalidad, limit=500),
-            headers=headers,
-            timeout=8
-        ).json()
+        clave_cache = f"{simbolo}_{intervalo}"
+        ahora = time.time()
+        if clave_cache in velas_cache and (ahora - velas_cache[clave_cache]['ts']) < 60:
+            velas = velas_cache[clave_cache]['data']
+        else:
+            velas = None
+            for sub in ("fapi1.binance.com", "fapi2.binance.com", "fapi3.binance.com", "fapi.binance.com"):
+                try:
+                    resp = requests.get(
+                        f"https://{sub}/fapi/v1/klines",
+                        params=dict(symbol=simbolo, interval=intervalo, limit=200),
+                        headers=headers,
+                        timeout=6
+                    ).json()
+                    if isinstance(resp, list) and len(resp) > 0:
+                        velas = resp
+                        velas_cache[clave_cache] = {'ts': ahora, 'data': velas}
+                        break
+                except Exception:
+                    continue
+
         if not isinstance(velas, list) or len(velas) == 0:
-            print("RESPUESTA DE BINANCE:", velas, "SIMBOLO:", simbolo)
+            print("NO SE PUDIERON CARGAR VELAS PARA:", simbolo)
             from dash import no_update
             return (no_update,) * 16
             
@@ -376,14 +406,10 @@ def obtener_datos(simbolo, temporalidad, rango_prof, modo_capa, n):
         df = df.assign(delta=df.taker_quote - (df.qav - df.taker_quote))
         precio_actual = float(df.close.iloc[-1])
 
-        libro = requests.get(
-            base + "/fapi/v1/depth",
-            params=dict(symbol=simbolo, limit=500),
-            headers=headers,
-            timeout=8
-        ).json()
-        bids = pd.DataFrame(libro.get('bids'), columns=('price', 'qty'), dtype=float)
-        asks = pd.DataFrame(libro.get('asks'), columns=('price', 'qty'), dtype=float)
+        bids_dict = libro_vivo.get(simbolo, {}).get('bids', {})
+        asks_dict = libro_vivo.get(simbolo, {}).get('asks', {})
+        bids = pd.DataFrame(list(bids_dict.items()), columns=['price', 'qty']) if bids_dict else pd.DataFrame(columns=['price', 'qty'])
+        asks = pd.DataFrame(list(asks_dict.items()), columns=['price', 'qty']) if asks_dict else pd.DataFrame(columns=['price', 'qty'])
 
         bids = bids.assign(usdt=bids.price * bids.qty)
         asks = asks.assign(usdt=asks.price * asks.qty)
