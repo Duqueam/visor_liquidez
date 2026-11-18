@@ -864,19 +864,28 @@ app.clientside_callback(
         const UMB_B = {HYPEUSDT: 5000, BTCUSDT: 25000, ETHUSDT: 15000, SOLUSDT: 10000};
         const UMB_L = {HYPEUSDT: 500, BTCUSDT: 2000, ETHUSDT: 1500, SOLUSDT: 1000};
 
-        if (!window._wsClienteOK) {
+                if (!window._wsClienteOK) {
             window._wsClienteOK = true;
-            const streams = ['!forceOrder@arr', 'hypeusdt@aggTrade', 'btcusdt@aggTrade', 'ethusdt@aggTrade', 'solusdt@aggTrade'].join('/');
+            window._vivo.msgs = 0;
             function conectar() {
-                const urlWs = 'wss:' + '//fstream.binance.com/stream?streams=' + streams;
+                const urlWs = 'wss:' + '//fstream.binance.com/ws';
                 const ws = new WebSocket(urlWs);
-                ws.onopen = function() { window._vivo.estado = 'WS Vivo'; };
+                ws.onopen = function() {
+                    window._vivo.estado = 'WS Vivo';
+                    ws.send(JSON.stringify({
+                        method: 'SUBSCRIBE',
+                        params: ['!forceOrder@arr', 'hypeusdt@aggTrade', 'btcusdt@aggTrade', 'ethusdt@aggTrade', 'solusdt@aggTrade'],
+                        id: 1
+                    }));
+                };
                 ws.onerror = function() { window._vivo.estado = 'Error WS'; };
                 ws.onmessage = function(ev) {
                     try {
-                        const msg = JSON.parse(ev.data);
-                        const st = msg.stream || '', d = msg.data || {};
-                        if (st === '!forceOrder@arr' && d.o) {
+                        window._vivo.msgs = (window._vivo.msgs || 0) + 1;
+                        const d = JSON.parse(ev.data);
+                        if (!d || !d.e) return;
+
+                        if (d.e === 'forceOrder' && d.o) {
                             const o = d.o, sim = o.s;
                             if (window._vivo.liq[sim]) {
                                 const p = parseFloat(o.ap || o.p || 0), usdt = p * parseFloat(o.q || 0);
@@ -885,7 +894,7 @@ app.clientside_callback(
                                     if (window._vivo.liq[sim].length > 150) window._vivo.liq[sim].shift();
                                 }
                             }
-                        } else if (st.includes('@aggTrade')) {
+                        } else if (d.e === 'aggTrade') {
                             const sim = d.s;
                             if (window._vivo.bombas[sim]) {
                                 const p = parseFloat(d.p || 0), usdt = p * parseFloat(d.q || 0);
