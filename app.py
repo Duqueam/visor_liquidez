@@ -1,12 +1,132 @@
+import json
+import time
+import threading
 import webbrowser
 from threading import Timer
+from collections import deque
 import requests
 import pandas as pd
+import websocket
 from dash import Dash, dcc, html, Input, Output
 
+# ==============================================================================
+# 1. MEMORIA EN TIEMPO REAL (WEBSOCKET PARA LIQUIDACIONES Y BOMBAS DE VOLUMEN)
+# ==============================================================================
+PARES = ('HYPEUSDT', 'BTCUSDT', 'ETHUSDT', 'SOLUSDT')
+
+UMBRAL_BOMBA_USDT = {
+    'HYPEUSDT': 75000,
+    'BTCUSDT': 1500000,
+    'ETHUSDT': 600000,
+    'SOLUSDT': 300000
+}
+
+UMBRAL_LIQ_USDT = {
+    'HYPEUSDT': 5000,
+    'BTCUSDT': 25000,
+    'ETHUSDT': 15000,
+    'SOLUSDT': 10000
+}
+
+liquidaciones_vivo = {p: deque(maxlen=150) for p in PARES}
+bombas_vivo = {p: deque(maxlen=100) for p in PARES}
+buffer_trades = {p: {'sec': 0, 'buy_usdt': 0.0, 'sell_usdt': 0.0, 'last_price': 0.0} for p in PARES}
+ws_iniciado = False
+
+
+def iniciar_websocket_binance():
+    global ws_iniciado
+    if ws_iniciado:
+        return
+    ws_iniciado = True
+
+    streams = ["!forceOrder@arr"] + [f"{p.lower()}@aggTrade" for p in PARES]
+    url = "wss://://binance.com" + "/".join(streams)
+
+    def on_message(ws, message):
+        try:
+            payload = json.loads(message)
+            stream = payload.get('stream', '')
+            data = payload.get('data', {})
+
+            if stream == '!forceOrder@arr':
+                orden = data.get('o', {})
+                simbolo = orden.get('s', '')
+                if simbolo in PARES:
+                    precio = float(orden.get('ap') or orden.get('p') or 0)
+                    qty = float(orden.get('q') or 0)
+                    usdt = precio * qty
+                    if usdt >= UMBRAL_LIQ_USDT.get(simbolo, 5000):
+                        lado = orden.get('S')
+                        ts_ms = int(orden.get('T', time.time() * 1000))
+                        liquidaciones_vivo[simbolo].append({
+                            'ts_ms': ts_ms,
+                            'price': precio,
+                            'usdt': usdt,
+                            'es_short_liq': (lado == 'BUY')
+                        })
+
+            elif '@aggTrade' in stream:
+                simbolo = data.get('s', '')
+                if simbolo in PARES:
+                    precio = float(data.get('p', 0))
+                    qty = float(data.get('q', 0))
+                    usdt = precio * qty
+                    es_venta_agresiva = data.get('m', False)
+                    ts_ms = int(data.get('T', time.time() * 1000))
+                    sec_actual = ts_ms // 1000
+
+                    buf = buffer_trades[simbolo]
+                    if buf['sec'] != sec_actual:
+                        umbral = UMBRAL_BOMBA_USDT.get(simbolo, 100000)
+                        if buf['buy_usdt'] >= umbral:
+                            bombas_vivo[simbolo].append({
+                                'ts_ms': buf['sec'] * 1000,
+                                'price': buf['last_price'],
+                                'usdt': buf['buy_usdt'],
+                                'tipo': 'COMPRA'
+                            })
+                        if buf['sell_usdt'] >= umbral:
+                            bombas_vivo[simbolo].append({
+                                'ts_ms': buf['sec'] * 1000,
+                                'price': buf['last_price'],
+                                'usdt': buf['sell_usdt'],
+                                'tipo': 'VENTA'
+                            })
+                        buf['sec'] = sec_actual
+                        buf['buy_usdt'] = 0.0
+                        buf['sell_usdt'] = 0.0
+
+                    buf['last_price'] = precio
+                    if es_venta_agresiva:
+                        buf['sell_usdt'] += usdt
+                    else:
+                        buf['buy_usdt'] += usdt
+
+        except Exception:
+            pass
+
+    def on_close(ws, close_status_code, close_msg):
+        time.sleep(2)
+        iniciar_websocket_binance()
+
+    def correr():
+        while True:
+            try:
+                ws = websocket.WebSocketApp(url, on_message=on_message, on_close=on_close)
+                ws.run_forever(ping_interval=20, ping_timeout=10)
+            except Exception:
+                time.sleep(3)
+
+    hilo = threading.Thread(target=correr, daemon=True)
+    hilo.start()
+
+
+# ==============================================================================
+# 2. INTERFAZ DASH Y DISEÑO VISUAL
+# ==============================================================================
 app = Dash(__name__)
-server = app.server
-app.title = "Visor Cripto Pro - Mapa de Calor + Order Flow"
+app.title = "Visor Cripto Pro - Mapa de Calor + Order Flow + Bombas"
 
 estilo_tarjeta = dict(
     backgroundColor='#131722',
@@ -17,107 +137,159 @@ estilo_tarjeta = dict(
     minWidth='150px'
 )
 
-app.layout = html.Div(style=dict(backgroundColor='#0b0e14', color='#e6edf3', fontFamily='Arial, sans-serif', padding='10px', minHeight='100vh'), children=(
-    html.Div(style=dict(display='flex', justifyContent='space-between', alignItems='center', marginBottom='8px', backgroundColor='#131722', padding='8px 16px', borderRadius='6px', border='1px solid #242936'), children=(
-        html.Div(style=dict(display='flex', alignItems='center', gap='10px'), children=(
-            html.Span("Mapa de calor + Order Flow", style=dict(fontWeight='bold', fontSize='15px', color='#ffffff')),
-            html.Span("Binance Perp", style=dict(backgroundColor='#242936', color='#848e9c', padding='2px 8px', borderRadius='4px', fontSize='11px', fontWeight='bold'))
-        )),
-        html.Div(style=dict(display='flex', gap='12px', alignItems='center'), children=(
-            dcc.Dropdown(
-                id='selector-moneda',
-                options=(
-                    dict(label='HYPEUSDT Perp', value='HYPEUSDT'),
-                    dict(label='BTCUSDT Perp', value='BTCUSDT'),
-                    dict(label='ETHUSDT Perp', value='ETHUSDT'),
-                    dict(label='SOLUSDT Perp', value='SOLUSDT'),
+barra_superior = html.Div(
+    style=dict(display='flex', justifyContent='space-between', alignItems='center', marginBottom='8px', backgroundColor='#131722', padding='8px 16px', borderRadius='6px', border='1px solid #242936', flexWrap='wrap', gap='8px'),
+    children=[
+        html.Div(
+            style=dict(display='flex', alignItems='center', gap='10px'),
+            children=[
+                html.Span("Mapa de calor + Order Flow + Bombas", style=dict(fontWeight='bold', fontSize='15px', color='#ffffff')),
+                html.Span("Binance Perp", style=dict(backgroundColor='#242936', color='#848e9c', padding='2px 8px', borderRadius='4px', fontSize='11px', fontWeight='bold'))
+            ]
+        ),
+        html.Div(
+            style=dict(display='flex', gap='10px', alignItems='center', flexWrap='wrap'),
+            children=[
+                dcc.Dropdown(
+                    id='selector-moneda',
+                    options=[
+                        dict(label='HYPEUSDT Perp', value='HYPEUSDT'),
+                        dict(label='BTCUSDT Perp', value='BTCUSDT'),
+                        dict(label='ETHUSDT Perp', value='ETHUSDT'),
+                        dict(label='SOLUSDT Perp', value='SOLUSDT')
+                    ],
+                    value='HYPEUSDT',
+                    clearable=False,
+                    style=dict(width='155px', color='#000', fontSize='12px', fontWeight='bold')
                 ),
-                value='HYPEUSDT',
-                clearable=False,
-                style=dict(width='155px', color='#000', fontSize='12px', fontWeight='bold')
-            ),
-            dcc.Dropdown(
-                id='selector-tf',
-                options=(
-                    dict(label='15m', value='15m'),
-                    dict(label='1H', value='1h'),
-                    dict(label='4H', value='4h'),
-                    dict(label='1D', value='1d'),
+                dcc.Dropdown(
+                    id='selector-tf',
+                    options=[
+                        dict(label='1m', value='1m'),
+                        dict(label='5m', value='5m'),
+                        dict(label='15m', value='15m'),
+                        dict(label='1H', value='1h'),
+                        dict(label='4H', value='4h'),
+                        dict(label='1D', value='1d')
+                    ],
+                    value='15m',
+                    clearable=False,
+                    style=dict(width='80px', color='#000', fontSize='12px', fontWeight='bold')
                 ),
-                value='4h',
-                clearable=False,
-                style=dict(width='80px', color='#000', fontSize='12px', fontWeight='bold')
-            ),
-            html.Span("● En vivo", style=dict(color='#00e676', fontSize='12px', fontWeight='bold'))
-        ))
-    )),
-
-    html.Div(id='panel-6-tarjetas', style=dict(display='flex', gap='8px', marginBottom='8px', flexWrap='wrap'), children=(
-        html.Div(style=estilo_tarjeta, children=(
+                dcc.Dropdown(
+                    id='selector-rango',
+                    options=[
+                        dict(label='Prof: ±1%', value=0.01),
+                        dict(label='Prof: ±3%', value=0.03),
+                        dict(label='Prof: ±5%', value=0.05),
+                        dict(label='Prof: ±10%', value=0.10),
+                        dict(label='Prof: Libro Completo', value=1.00)
+                    ],
+                    value=1.00,
+                    clearable=False,
+                    style=dict(width='170px', color='#000', fontSize='12px', fontWeight='bold')
+                ),
+                dcc.Dropdown(
+                    id='selector-capa',
+                    options=[
+                        dict(label='Capa: Ambos', value='AMBOS'),
+                        dict(label='Capa: Liq 10x-100x', value='LIQ'),
+                        dict(label='Capa: Muros Libro', value='MUROS')
+                    ],
+                    value='AMBOS',
+                    clearable=False,
+                    style=dict(width='155px', color='#000', fontSize='12px', fontWeight='bold')
+                ),
+                html.Span("● WS En vivo", style=dict(color='#00e676', fontSize='12px', fontWeight='bold'))
+            ]
+        )
+    ]
+)
+panel_tarjetas = html.Div(
+    id='panel-6-tarjetas',
+    style=dict(display='flex', gap='8px', marginBottom='8px', flexWrap='wrap'),
+    children=[
+        html.Div(style=estilo_tarjeta, children=[
             html.Div("Último precio · Binance Perp", style=dict(fontSize='11px', color='#848e9c', marginBottom='4px')),
             html.Div("--", id='t1-principal', style=dict(fontSize='20px', fontWeight='bold', color='#ffffff')),
             html.Div("Compra -- · Venta --", id='t1-sub', style=dict(fontSize='11px', color='#848e9c', marginTop='3px'))
-        )),
-        html.Div(style=estilo_tarjeta, children=(
-            html.Div("Profundidad de compra · 1%", style=dict(fontSize='11px', color='#848e9c', marginBottom='4px')),
+        ]),
+        html.Div(style=estilo_tarjeta, children=[
+            html.Div("Profundidad de compra", id='t2-titulo', style=dict(fontSize='11px', color='#848e9c', marginBottom='4px')),
             html.Div("--", id='t2-principal', style=dict(fontSize='20px', fontWeight='bold', color='#00e676')),
             html.Div("-- monedas", id='t2-sub', style=dict(fontSize='11px', color='#848e9c', marginTop='3px'))
-        )),
-        html.Div(style=estilo_tarjeta, children=(
-            html.Div("Profundidad de venta · 1%", style=dict(fontSize='11px', color='#848e9c', marginBottom='4px')),
+        ]),
+        html.Div(style=estilo_tarjeta, children=[
+            html.Div("Profundidad de venta", id='t3-titulo', style=dict(fontSize='11px', color='#848e9c', marginBottom='4px')),
             html.Div("--", id='t3-principal', style=dict(fontSize='20px', fontWeight='bold', color='#ff5252')),
             html.Div("-- monedas", id='t3-sub', style=dict(fontSize='11px', color='#848e9c', marginTop='3px'))
-        )),
-        html.Div(style=estilo_tarjeta, children=(
-            html.Div("Desequilibrio · ±1%", style=dict(fontSize='11px', color='#848e9c', marginBottom='4px')),
+        ]),
+        html.Div(style=estilo_tarjeta, children=[
+            html.Div("Desequilibrio libro", id='t4-titulo', style=dict(fontSize='11px', color='#848e9c', marginBottom='4px')),
             html.Div("--", id='t4-principal', style=dict(fontSize='20px', fontWeight='bold', color='#00e676')),
-            html.Div("Presión libro cercano", id='t4-sub', style=dict(fontSize='11px', color='#848e9c', marginTop='3px'))
-        )),
-        html.Div(style=estilo_tarjeta, children=(
+            html.Div("Presión en rango activo", id='t4-sub', style=dict(fontSize='11px', color='#848e9c', marginTop='3px'))
+        ]),
+        html.Div(style=estilo_tarjeta, children=[
             html.Div("Mayor muro de compra", style=dict(fontSize='11px', color='#848e9c', marginBottom='4px')),
             html.Div("--", id='t5-principal', style=dict(fontSize='20px', fontWeight='bold', color='#00e676')),
             html.Div("-- del precio", id='t5-sub', style=dict(fontSize='11px', color='#848e9c', marginTop='3px'))
-        )),
-        html.Div(style=estilo_tarjeta, children=(
+        ]),
+        html.Div(style=estilo_tarjeta, children=[
             html.Div("Mayor muro de venta", style=dict(fontSize='11px', color='#848e9c', marginBottom='4px')),
             html.Div("--", id='t6-principal', style=dict(fontSize='20px', fontWeight='bold', color='#ff5252')),
             html.Div("-- del precio", id='t6-sub', style=dict(fontSize='11px', color='#848e9c', marginTop='3px'))
-        )),
-    )),
+        ])
+    ]
+)
 
-    html.Div(style=dict(display='flex', justifyContent='space-between', alignItems='center', marginBottom='6px', backgroundColor='#131722', padding='5px 14px', borderRadius='4px', fontSize='11px', border='1px solid #1e222d'), children=(
-        html.Div((
+barra_leyenda = html.Div(
+    style=dict(display='flex', justifyContent='space-between', alignItems='center', marginBottom='6px', backgroundColor='#131722', padding='5px 14px', borderRadius='4px', fontSize='11px', border='1px solid #1e222d', flexWrap='wrap', gap='8px'),
+    children=[
+        html.Div([
             html.Span("Calor libro: ", style=dict(fontWeight='bold', color='#d1d4dc', marginRight='6px')),
             html.Span("■ Bajo ", style=dict(color='#9575cd', marginRight='6px')),
             html.Span("■ Alto ", style=dict(color='#00e676', marginRight='6px')),
-            html.Span("■ Máximo", style=dict(color='#ffeb3b')),
-        )),
-        html.Div((
-            html.Span("Rombos Liq Reales: ", style=dict(fontWeight='bold', color='#d1d4dc', marginRight='6px')),
+            html.Span("■ Máximo", style=dict(color='#ffeb3b'))
+        ]),
+        html.Div([
+            html.Span("Liquidaciones WS: ", style=dict(fontWeight='bold', color='#d1d4dc', marginRight='6px')),
             html.Span("◆ Liq Shorts ", style=dict(color='#00e5ff', marginRight='8px')),
-            html.Span("◆ Liq Longs", style=dict(color='#ffab00')),
-        )),
-        html.Div((
+            html.Span("◆ Liq Longs", style=dict(color='#ffab00'))
+        ]),
+        html.Div([
+            html.Span("Bombas Volumen (1s): ", style=dict(fontWeight='bold', color='#d1d4dc', marginRight='6px')),
+            html.Span("● Bomba Compra ", style=dict(color='#00e676', marginRight='8px')),
+            html.Span("● Bomba Venta", style=dict(color='#ff1744'))
+        ]),
+        html.Div([
             html.Span("Panel Inferior: ", style=dict(fontWeight='bold', color='#d1d4dc', marginRight='6px')),
-            html.Span("Order Flow (Delta Compras vs Ventas a Mercado)", style=dict(color='#848e9c')),
-        ))
-    )),
+            html.Span("Order Flow Delta", style=dict(color='#848e9c'))
+        ])
+    ]
+)
 
-    dcc.Store(id='memoria-datos'),
-    dcc.Graph(
-        id='grafico-liquidez',
-        style=dict(height='74vh'),
-        config=dict(scrollZoom=True, displayModeBar=True)
-    ),
-    dcc.Interval(id='intervalo-actualizacion', interval=6000, n_intervals=0)
-))
-
+app.layout = html.Div(
+    style=dict(backgroundColor='#0b0e14', color='#e6edf3', fontFamily='Arial, sans-serif', padding='10px', minHeight='100vh'),
+    children=[
+        barra_superior,
+        panel_tarjetas,
+        barra_leyenda,
+        dcc.Store(id='memoria-datos'),
+        dcc.Graph(
+            id='grafico-liquidez',
+            style=dict(height='73vh'),
+            config=dict(scrollZoom=True, displayModeBar=True)
+        ),
+        dcc.Interval(id='intervalo-actualizacion', interval=6000, n_intervals=0)
+    ]
+)
 def fmt_coinglass(valor):
     if valor >= 1000000:
         return f"{valor / 1000000:.2f}M"
     elif valor >= 1000:
         return f"{valor / 1000:.0f}K"
     return f"{valor:.0f}"
+
 
 def color_calor(intensidad):
     if intensidad >= 0.85:
@@ -130,30 +302,53 @@ def color_calor(intensidad):
         return "rgba(0, 188, 212, 0.25)"
     else:
         return "rgba(103, 58, 183, 0.20)"
+
+
+def alinear_a_vela(ts_ms, temporalidad):
+    mapa_tf = {'1m': '1min', '5m': '5min', '15m': '15min', '1h': '1h', '4h': '4h', '1d': '1D'}
+    freq = mapa_tf.get(temporalidad, '15min')
+    return pd.to_datetime(ts_ms, unit='ms').floor(freq).strftime('%Y-%m-%d %H:%M:%S')
+
+
+# ==============================================================================
+# 3. CALLBACK DE DATOS Y PROCESAMIENTO
+# ==============================================================================
 @app.callback(
-    (Output('memoria-datos', 'data'),
+    [Output('memoria-datos', 'data'),
      Output('t1-principal', 'children'),
      Output('t1-sub', 'children'),
+     Output('t2-titulo', 'children'),
      Output('t2-principal', 'children'),
      Output('t2-sub', 'children'),
+     Output('t3-titulo', 'children'),
      Output('t3-principal', 'children'),
      Output('t3-sub', 'children'),
+     Output('t4-titulo', 'children'),
      Output('t4-principal', 'children'),
      Output('t4-principal', 'style'),
      Output('t5-principal', 'children'),
      Output('t5-sub', 'children'),
      Output('t6-principal', 'children'),
-     Output('t6-sub', 'children')),
-    (Input('selector-moneda', 'value'),
+     Output('t6-sub', 'children')],
+    [Input('selector-moneda', 'value'),
      Input('selector-tf', 'value'),
-     Input('intervalo-actualizacion', 'n_intervals'))
+     Input('selector-rango', 'value'),
+     Input('selector-capa', 'value'),
+     Input('intervalo-actualizacion', 'n_intervals')]
 )
-def obtener_datos(simbolo, temporalidad, n):
-    headers = dict(**{"User-Agent": "Mozilla/5.0"})
+def obtener_datos(simbolo, temporalidad, rango_prof, modo_capa, n):
+    headers = {"Accept": "application/json"}
     moneda_base = simbolo.replace("USDT", "")
+    etiqueta_rango = "Libro Completo" if rango_prof >= 1.0 else f"±{int(rango_prof * 100)}%"
+
     try:
-        base = "https://" + "fapi." + "binance." + "com"
-        velas = requests.get(base + "/fapi/v1/klines", params=dict(symbol=simbolo, interval=temporalidad, limit=120), headers=headers, timeout=8).json()
+        base = "https://binance.com"
+        velas = requests.get(
+            base + "/fapi/v1/klines",
+            params=dict(symbol=simbolo, interval=temporalidad, limit=500),
+            headers=headers,
+            timeout=8
+        ).json()
 
         cols = ('time', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'qav', 'num_trades', 'taker_base', 'taker_quote', 'ignore')
         df = pd.DataFrame(velas, columns=cols)
@@ -163,14 +358,19 @@ def obtener_datos(simbolo, temporalidad, n):
             high=df.high.astype(float),
             low=df.low.astype(float),
             close=df.close.astype(float),
+            volume=df.volume.astype(float),
             qav=df.qav.astype(float),
             taker_quote=df.taker_quote.astype(float)
         )
-        # Cálculo de Order Flow (Delta = Compras a mercado - Ventas a mercado en USDT)
         df = df.assign(delta=df.taker_quote - (df.qav - df.taker_quote))
         precio_actual = float(df.close.iloc[-1])
 
-        libro = requests.get(base + "/fapi/v1/depth", params=dict(symbol=simbolo, limit=1000), headers=headers, timeout=8).json()
+        libro = requests.get(
+            base + "/fapi/v1/depth",
+            params=dict(symbol=simbolo, limit=500),
+            headers=headers,
+            timeout=8
+        ).json()
         bids = pd.DataFrame(libro.get('bids'), columns=('price', 'qty'), dtype=float)
         asks = pd.DataFrame(libro.get('asks'), columns=('price', 'qty'), dtype=float)
 
@@ -180,29 +380,41 @@ def obtener_datos(simbolo, temporalidad, n):
         mejor_compra = float(bids.price.max()) if not bids.empty else precio_actual
         mejor_venta = float(asks.price.min()) if not asks.empty else precio_actual
 
-        bids_1pct = bids[bids.price >= precio_actual * 0.99]
-        asks_1pct = asks[asks.price <= precio_actual * 1.01]
+        if rango_prof < 1.0:
+            bids_filtrados = bids[bids.price >= precio_actual * (1.0 - rango_prof)].copy()
+            asks_filtrados = asks[asks.price <= precio_actual * (1.0 + rango_prof)].copy()
+        else:
+            bids_filtrados = bids.copy()
+            asks_filtrados = asks.copy()
 
-        prof_compra_usdt = float(bids_1pct.usdt.sum())
-        prof_compra_qty = float(bids_1pct.qty.sum())
-        prof_venta_usdt = float(asks_1pct.usdt.sum())
-        prof_venta_qty = float(asks_1pct.qty.sum())
+        prof_compra_usdt = float(bids_filtrados.usdt.sum())
+        prof_compra_qty = float(bids_filtrados.qty.sum())
+        prof_venta_usdt = float(asks_filtrados.usdt.sum())
+        prof_venta_qty = float(asks_filtrados.qty.sum())
 
-        total_1pct = prof_compra_usdt + prof_venta_usdt
-        desequilibrio = ((prof_compra_usdt - prof_venta_usdt) / total_1pct * 100) if total_1pct > 0 else 0.0
+        total_rango = prof_compra_usdt + prof_venta_usdt
+        desequilibrio = ((prof_compra_usdt - prof_venta_usdt) / total_rango * 100) if total_rango > 0 else 0.0
         signo_deseq = "+" if desequilibrio >= 0 else ""
         color_deseq = "#00e676" if desequilibrio >= 0 else "#ff5252"
         estilo_t4 = dict(fontSize='20px', fontWeight='bold', color=color_deseq)
 
-        paso = precio_actual * 0.0025
-        bids = bids.assign(zona=(bids.price // paso) * paso)
-        asks = asks.assign(zona=(asks.price // paso) * paso)
+                # Agrupación precisa sin cruzar compra y venta
+        bids_filtrados = bids_filtrados[bids_filtrados.price < precio_actual].copy()
+        asks_filtrados = asks_filtrados[asks_filtrados.price > precio_actual].copy()
 
-        top_bids = bids.groupby('zona', as_index=False).usdt.sum().nlargest(12, 'usdt')
-        top_asks = asks.groupby('zona', as_index=False).usdt.sum().nlargest(12, 'usdt')
+        rango_real_bids = (precio_actual - bids_filtrados.price.min()) if not bids_filtrados.empty else precio_actual * 0.01
+        rango_real_asks = (asks_filtrados.price.max() - precio_actual) if not asks_filtrados.empty else precio_actual * 0.01
+        rango_max_libro = max(rango_real_bids, rango_real_asks, precio_actual * 0.005)
+        paso = rango_max_libro / 18.0
 
-        mayor_bid = top_bids.iloc[-len(top_bids)]
-        mayor_ask = top_asks.iloc[-len(top_asks)]
+        bids_filtrados = bids_filtrados.assign(zona=((bids_filtrados.price // paso) * paso) + (paso * 0.5))
+        asks_filtrados = asks_filtrados.assign(zona=((asks_filtrados.price // paso) * paso) + (paso * 0.5))
+
+        top_bids = bids_filtrados.groupby('zona', as_index=False).usdt.sum().nlargest(12, 'usdt')
+        top_asks = asks_filtrados.groupby('zona', as_index=False).usdt.sum().nlargest(12, 'usdt')
+
+        mayor_bid = top_bids.iloc[-len(top_bids)] if not top_bids.empty else pd.Series({'zona': precio_actual, 'usdt': 0})
+        mayor_ask = top_asks.iloc[-len(top_asks)] if not top_asks.empty else pd.Series({'zona': precio_actual, 'usdt': 0})
 
         m_bid_precio = float(mayor_bid.zona)
         m_bid_vol = fmt_coinglass(float(mayor_bid.usdt))
@@ -214,63 +426,161 @@ def obtener_datos(simbolo, temporalidad, n):
 
         t1_p = f"{precio_actual:,.3f}"
         t1_s = f"Compra {mejor_compra:,.3f} · Venta {mejor_venta:,.3f}"
+        t2_tit = f"Profundidad compra · {etiqueta_rango}"
         t2_p = fmt_coinglass(prof_compra_usdt)
         t2_s = f"{fmt_coinglass(prof_compra_qty)} {moneda_base}"
+        t3_tit = f"Profundidad venta · {etiqueta_rango}"
         t3_p = fmt_coinglass(prof_venta_usdt)
         t3_s = f"{fmt_coinglass(prof_venta_qty)} {moneda_base}"
+        t4_tit = f"Desequilibrio · {etiqueta_rango}"
         t4_p = f"{signo_deseq}{desequilibrio:.1f}%"
-        t5_p = html.Span((f"{m_bid_precio:,.2f} ", html.Span(m_bid_vol, style=dict(fontSize='12px', color='#848e9c', fontWeight='normal'))))
+        t5_p = html.Span([f"{m_bid_precio:,.2f} ", html.Span(m_bid_vol, style=dict(fontSize='12px', color='#848e9c', fontWeight='normal'))])
         t5_s = f"{m_bid_dist:+.2f}% del precio"
-        t6_p = html.Span((f"{m_ask_precio:,.2f} ", html.Span(m_ask_vol, style=dict(fontSize='12px', color='#848e9c', fontWeight='normal'))))
+        t6_p = html.Span([f"{m_ask_precio:,.2f} ", html.Span(m_ask_vol, style=dict(fontSize='12px', color='#848e9c', fontWeight='normal'))])
         t6_s = f"{m_ask_dist:+.2f}% del precio"
 
-        # Rombos de Liquidaciones Reales en tiempo real
-        liq_x = []
-        liq_y = []
-        liq_colores = []
-        liq_tamanos = []
-        liq_textos = []
-        try:
-            ordenes_liq = requests.get(base + "/fapi/v1/allForceOrders", params=dict(symbol=simbolo, limit=50), headers=headers, timeout=4).json()
-            if isinstance(ordenes_liq, list):
-                t_min = str(df.time.iloc[-len(df)])
-                for item in ordenes_liq:
-                    t_liq = pd.to_datetime(item.get('time'), unit='ms').strftime('%Y-%m-%d %H:%M:%S')
-                    if t_liq >= t_min:
-                        p_liq = float(item.get('averagePrice') or item.get('price'))
-                        q_liq = float(item.get('origQty'))
-                        usdt_liq = p_liq * q_liq
-                        lado_liq = item.get('side')
-                        es_short_liq = (lado_liq == 'BUY')
-                        liq_x.append(t_liq)
-                        liq_y.append(p_liq)
-                        liq_colores.append('#00e5ff' if es_short_liq else '#ffab00')
-                        liq_tamanos.append(min(max(usdt_liq / 15000, 9), 22))
-                        tipo_txt = "Liq Short (Compra forzada)" if es_short_liq else "Liq Long (Venta forzada)"
-                        liq_textos.append(f"◆ {tipo_txt}<br>Monto: {fmt_coinglass(usdt_liq)} | Precio: {p_liq:,.3f}")
-        except Exception:
-            pass
+        # Rombos de Liquidaciones Reales capturados por WebSocket
+        liq_x, liq_y, liq_colores, liq_tamanos, liq_textos = [], [], [], [], []
+        t_min = str(df.time.iloc[-len(df)])
+        umbral_l = UMBRAL_LIQ_USDT.get(simbolo, 5000)
 
-        todos_muros = pd.concat((top_bids, top_asks), ignore_index=True)
-        max_usdt = float(todos_muros.usdt.max()) if not todos_muros.empty else 1.0
+        for item in list(liquidaciones_vivo.get(simbolo, [])):
+            t_vela = alinear_a_vela(item['ts_ms'], temporalidad)
+            if t_vela >= t_min:
+                usdt_liq = item['usdt']
+                p_liq = item['price']
+                es_short = item['es_short_liq']
+                liq_x.append(t_vela)
+                liq_y.append(p_liq)
+                liq_colores.append('#00e5ff' if es_short else '#ffab00')
+                liq_tamanos.append(min(max((usdt_liq / umbral_l) * 8, 10), 26))
+                tipo_txt = "Liq Short (Compra forzada)" if es_short else "Liq Long (Venta forzada)"
+                liq_textos.append(f"◆ {tipo_txt}<br>Monto: {fmt_coinglass(usdt_liq)} | Precio: {p_liq:,.3f}")
 
+        # Bombas de Volumen en tiempo real capturadas por WebSocket
+        bomba_x, bomba_y, bomba_colores, bomba_tamanos, bomba_textos = [], [], [], [], []
+        umbral_b = UMBRAL_BOMBA_USDT.get(simbolo, 100000)
+
+        for b in list(bombas_vivo.get(simbolo, [])):
+            t_vela = alinear_a_vela(b['ts_ms'], temporalidad)
+            if t_vela >= t_min:
+                usdt_b = b['usdt']
+                p_b = b['price']
+                es_compra_b = (b['tipo'] == 'COMPRA')
+                bomba_x.append(t_vela)
+                bomba_y.append(p_b)
+                bomba_colores.append('rgba(0, 230, 118, 0.78)' if es_compra_b else 'rgba(255, 23, 68, 0.78)')
+                bomba_tamanos.append(min(max((usdt_b / umbral_b) * 16, 16), 42))
+                titulo_b = "BOMBA COMPRA AGRESIVA (1s)" if es_compra_b else "BOMBA VENTA AGRESIVA (1s)"
+                bomba_textos.append(f"● {titulo_b}<br>Volumen: {fmt_coinglass(usdt_b)} | Precio: {p_b:,.3f}")
+
+                # Dibujo de muros y Mapa de Liquidaciones Estimadas (10x, 25x, 50x, 100x)
         formas = []
         anotaciones = []
         x_inicio = str(df.time.iloc[-len(df)])
         x_fin = str(df.time.iloc[-1])
 
-        for _, fila in todos_muros.iterrows():
-            intensidad = float(fila.usdt) / max_usdt
-            zona_val = float(fila.zona)
-            vol_cg = fmt_coinglass(float(fila.usdt))
-            es_compra = zona_val < precio_actual
-            lado = "Muro compra" if es_compra else "Muro venta"
+        # A. Capa de Muros Reales del Libro de Órdenes
+        if modo_capa in ('AMBOS', 'MUROS'):
+            max_bid_usdt = float(top_bids.usdt.max()) if not top_bids.empty else 1.0
+            max_ask_usdt = float(top_asks.usdt.max()) if not top_asks.empty else 1.0
 
-            formas.append(dict(type="rect", xref="x", yref="y", x0=x_inicio, x1=x_fin, y0=zona_val - paso * 0.4, y1=zona_val + paso * 0.4, fillcolor=color_calor(intensidad), line=dict(width=0), layer="below"))
+            for _, fila in top_bids.iterrows():
+                zona_val = float(fila.zona)
+                intensidad = float(fila.usdt) / max_bid_usdt
+                vol_cg = fmt_coinglass(float(fila.usdt))
+                alpha_v = min(max(intensidad * 0.42, 0.12), 0.48)
 
-            if intensidad >= 0.50:
-                color_txt = "#00e676" if es_compra else "#ff5252"
-                anotaciones.append(dict(xref="paper", x=0.84, y=zona_val, text=f"{lado} {vol_cg} ({zona_val:,.2f})", showarrow=False, xanchor="right", yanchor="middle", bgcolor="rgba(19, 23, 34, 0.88)", bordercolor=color_txt, borderwidth=1, borderpad=2, font=dict(color=color_txt, size=10)))
+                formas.append(dict(
+                    type="rect", xref="paper", yref="y",
+                    x0=0, x1=1,
+                    y0=zona_val - paso * 0.42, y1=zona_val + paso * 0.42,
+                    fillcolor=f"rgba(0, 230, 118, {alpha_v:.2f})", line=dict(width=0), layer="below"
+                ))
+
+                if intensidad >= 0.48:
+                    anotaciones.append(dict(
+                        xref="paper", x=0.84, y=zona_val,
+                        text=f"Muro compra {vol_cg} ({zona_val:,.2f})",
+                        showarrow=False, xanchor="right", yanchor="middle",
+                        bgcolor="rgba(19, 23, 34, 0.88)", bordercolor="#00e676",
+                        borderwidth=1, borderpad=2, font=dict(color="#00e676", size=10)
+                    ))
+
+            for _, fila in top_asks.iterrows():
+                zona_val = float(fila.zona)
+                intensidad = float(fila.usdt) / max_ask_usdt
+                vol_cg = fmt_coinglass(float(fila.usdt))
+                alpha_r = min(max(intensidad * 0.42, 0.12), 0.48)
+
+                formas.append(dict(
+                    type="rect", xref="paper", yref="y",
+                    x0=0, x1=1,
+                    y0=zona_val - paso * 0.42, y1=zona_val + paso * 0.42,
+                    fillcolor=f"rgba(255, 82, 82, {alpha_r:.2f})", line=dict(width=0), layer="below"
+                ))
+
+                if intensidad >= 0.48:
+                    anotaciones.append(dict(
+                        xref="paper", x=0.84, y=zona_val,
+                        text=f"Muro venta {vol_cg} ({zona_val:,.2f})",
+                        showarrow=False, xanchor="right", yanchor="middle",
+                        bgcolor="rgba(19, 23, 34, 0.88)", bordercolor="#ff5252",
+                        borderwidth=1, borderpad=2, font=dict(color="#ff5252", size=10)
+                    ))
+
+        # B. Capa de Liquidaciones Estimadas (10x, 25x, 50x, 100x) con corte al ser barridas
+        if modo_capa in ('AMBOS', 'LIQ'):
+            df_liq = df.tail(90).reset_index(drop=True)
+            vol_medio = float(df_liq.volume.mean()) if not df_liq.empty else 1.0
+            apalancamientos = (10, 25, 50, 100)
+            alto_bloque = precio_actual * 0.0018
+
+            for i in range(len(df_liq) - 1):
+                vol_v = float(df_liq.volume.iloc[i])
+                if vol_v < vol_medio * 1.15:
+                    continue
+
+                t_origen = str(df_liq.time.iloc[i])
+                p_ref = float(df_liq.close.iloc[i])
+                futuros = df_liq.iloc[i + 1:]
+
+                for apal in apalancamientos:
+                    dist_liq = (1.0 / apal) * 0.90
+                    p_liq_long = p_ref * (1.0 - dist_liq)
+                    p_liq_short = p_ref * (1.0 + dist_liq)
+
+                    # Color según concentración/apalancamiento (Verde -> Amarillo -> Rojo)
+                    if apal >= 100:
+                        color_pool = "rgba(255, 23, 68, 0.55)"
+                    elif apal >= 50:
+                        color_pool = "rgba(255, 235, 59, 0.48)"
+                    elif apal >= 25:
+                        color_pool = "rgba(0, 230, 118, 0.38)"
+                    else:
+                        color_pool = "rgba(0, 188, 212, 0.28)"
+
+                    # Pool de Longs (abajo): se corta si alguna vela posterior baja hasta p_liq_long
+                    barrido_long = futuros[futuros.low <= p_liq_long]
+                    t_fin_long = str(barrido_long.time.iloc[-len(barrido_long)]) if not barrido_long.empty else x_fin
+                    if t_fin_long > t_origen:
+                        formas.append(dict(
+                            type="rect", xref="x", yref="y",
+                            x0=t_origen, x1=t_fin_long,
+                            y0=p_liq_long - alto_bloque, y1=p_liq_long + alto_bloque,
+                            fillcolor=color_pool, line=dict(width=0), layer="below"
+                        ))
+
+                    # Pool de Shorts (arriba): se corta si alguna vela posterior sube hasta p_liq_short
+                    barrido_short = futuros[futuros.high >= p_liq_short]
+                    t_fin_short = str(barrido_short.time.iloc[-len(barrido_short)]) if not barrido_short.empty else x_fin
+                    if t_fin_short > t_origen:
+                        formas.append(dict(
+                            type="rect", xref="x", yref="y",
+                            x0=t_origen, x1=t_fin_short,
+                            y0=p_liq_short - alto_bloque, y1=p_liq_short + alto_bloque,
+                            fillcolor=color_pool, line=dict(width=0), layer="below"
+                        ))
 
         formas.append(dict(type="line", x0=x_inicio, x1=x_fin, y0=precio_actual, y1=precio_actual, line=dict(color="#ffffff", width=1.2, dash="dot")))
         anotaciones.append(dict(xref="paper", x=1.002, y=precio_actual, text=f"<b>{precio_actual:,.3f}</b>", showarrow=False, xanchor="left", yanchor="middle", bgcolor="#ffffff", bordercolor="#ffffff", borderwidth=1, borderpad=3, font=dict(color="#0b0e14", size=11)))
@@ -284,8 +594,8 @@ def obtener_datos(simbolo, temporalidad, n):
         delta_colores = tuple('#089981' if v >= 0 else '#f23645' for v in delta_vals)
 
         datos_fig = dict(
-            clave=f"{simbolo}-{temporalidad}",
-            titulo=f"{moneda_base} · Binance Perp · {temporalidad.upper()} | Compra {mejor_compra:,.3f} · Venta {mejor_venta:,.3f}",
+            clave=f"{simbolo}-{temporalidad}-{rango_prof}",
+            titulo=f"{moneda_base} · Binance Perp · {temporalidad.upper()} · {etiqueta_rango} | Compra {mejor_compra:,.3f} · Venta {mejor_venta:,.3f}",
             time=tuple(df.time),
             open=tuple(df.open),
             high=tuple(df.high),
@@ -302,22 +612,31 @@ def obtener_datos(simbolo, temporalidad, n):
             liq_colores=tuple(liq_colores),
             liq_tamanos=tuple(liq_tamanos),
             liq_textos=tuple(liq_textos),
+            bomba_x=tuple(bomba_x),
+            bomba_y=tuple(bomba_y),
+            bomba_colores=tuple(bomba_colores),
+            bomba_tamanos=tuple(bomba_tamanos),
+            bomba_textos=tuple(bomba_textos),
             formas=formas,
             anotaciones=anotaciones
         )
-        return datos_fig, t1_p, t1_s, t2_p, t2_s, t3_p, t3_s, t4_p, estilo_t4, t5_p, t5_s, t6_p, t6_s
+        return datos_fig, t1_p, t1_s, t2_tit, t2_p, t2_s, t3_tit, t3_p, t3_s, t4_tit, t4_p, estilo_t4, t5_p, t5_s, t6_p, t6_s
 
-    except Exception as error:
-        estilo_err = dict(fontSize='20px', fontWeight='bold', color='#ff5252')
-        return dict(error=str(error)), "Error", str(error), "--", "--", "--", "--", "--", estilo_err, "--", "--", "--", "--"
+    except Exception:
+        from dash import no_update
+        return (no_update,) * 16
 
+
+# ==============================================================================
+# 4. RENDERIZADO EN CLIENTE (PLOTLY JAVASCRIPT)
+# ==============================================================================
 app.clientside_callback(
     """
     function(datos, figActual) {
         if (!datos) return window.dash_clientside.no_update;
-       if (datos.error) {
-    return window.dash_clientside.no_update;
-    }
+        if (datos.error) {
+            return {data: [], layout: {template: 'plotly_dark', title: 'Error: ' + datos.error}};
+        }
 
         if (!window.cursorTvListo) {
             window.cursorTvListo = true;
@@ -361,7 +680,7 @@ app.clientside_callback(
             });
         }
 
-        var data = new Array(
+        var data = [
             {
                 type: 'candlestick',
                 x: datos.time,
@@ -389,11 +708,22 @@ app.clientside_callback(
             {
                 type: 'scatter',
                 mode: 'markers',
+                x: datos.bomba_x,
+                y: datos.bomba_y,
+                yaxis: 'y',
+                text: datos.bomba_textos,
+                marker: {symbol: 'circle', size: datos.bomba_tamanos, color: datos.bomba_colores, line: {width: 1.5, color: '#ffffff'}},
+                name: 'Bombas',
+                hovertemplate: '%{text}<extra></extra>'
+            },
+            {
+                type: 'scatter',
+                mode: 'markers',
                 x: datos.liq_x,
                 y: datos.liq_y,
                 yaxis: 'y',
                 text: datos.liq_textos,
-                marker: {symbol: 'diamond', size: datos.liq_tamanos, color: datos.liq_colores, line: {width: 1, color: '#ffffff'}},
+                marker: {symbol: 'diamond', size: datos.liq_tamanos, color: datos.liq_colores, line: {width: 1.2, color: '#ffffff'}},
                 name: 'Liquidaciones',
                 hovertemplate: '%{text}<extra></extra>'
             },
@@ -403,10 +733,11 @@ app.clientside_callback(
                 y: datos.delta_vals,
                 yaxis: 'y2',
                 marker: {color: datos.delta_colores, opacity: 0.85},
-                name: 'Order Flow Delta',
+                name: 'Delta',
                 hovertemplate: 'Delta: %{y:,.0f}K USDT<extra></extra>'
             }
-        );
+        ];
+
         var layout = {
             template: 'plotly_dark',
             paper_bgcolor: '#0b0e14',
@@ -421,7 +752,7 @@ app.clientside_callback(
             annotations: datos.anotaciones,
             margin: {l: 10, r: 75, t: 30, b: 20},
             yaxis: {
-                domain: new Array(0.24, 1.0),
+                domain: [0.24, 1.0],
                 side: 'right',
                 gridcolor: '#1c202a',
                 fixedrange: false,
@@ -435,7 +766,7 @@ app.clientside_callback(
                 spikedash: 'dash'
             },
             yaxis2: {
-                domain: new Array(0.0, 0.20),
+                domain: [0.0, 0.20],
                 side: 'right',
                 gridcolor: '#1c202a',
                 fixedrange: false,
@@ -456,13 +787,14 @@ app.clientside_callback(
             xaxis2: {
                 overlaying: 'x',
                 side: 'top',
-                range: new Array(datos.max_k * 6, 0),
+                range: [datos.max_k * 6, 0],
                 showgrid: false,
                 showticklabels: false,
                 fixedrange: true
             },
             title: {text: datos.titulo, font: {size: 12, color: '#848e9c'}, x: 0.01}
         };
+
         if (figActual && figActual.layout && figActual.layout.uirevision === datos.clave) {
             if (figActual.layout.xaxis && figActual.layout.xaxis.range) {
                 layout.xaxis.range = figActual.layout.xaxis.range;
@@ -481,9 +813,12 @@ app.clientside_callback(
     Input('grafico-liquidez', 'figure')
 )
 
+
 def abrir_navegador():
-    webbrowser.open_new("http://" + "localhost:8050/")
+    webbrowser.open_new("http://localhost:8050/")
+
 
 if __name__ == '__main__':
+    iniciar_websocket_binance()
     Timer(2.0, abrir_navegador).start()
     app.run(debug=False, host="127.0.0.1", port=8050)
