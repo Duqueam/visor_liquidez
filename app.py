@@ -125,7 +125,14 @@ def iniciar_websocket_binance():
 # ==============================================================================
 # 2. INTERFAZ DASH Y DISEÑO VISUAL
 # ==============================================================================
-app = Dash(__name__)
+app = Dash(
+    __name__,
+    meta_tags=[
+        {"name": "viewport", "content": "width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"}
+    ]
+)
+server = app.server
+
 app.title = "Visor Cripto Pro - Mapa de Calor + Order Flow + Bombas"
 
 estilo_tarjeta = dict(
@@ -814,11 +821,11 @@ app.clientside_callback(
 )
 
 
-def abrir_navegador():
-    webbrowser.open_new("http://localhost:8050/")
+import os
 
+iniciar_websocket_binance()
 
 if __name__ == '__main__':
-    iniciar_websocket_binance()
-    Timer(2.0, abrir_navegador).start()
-    app.run(debug=False, host="127.0.0.1", port=8050)
+    puerto = int(os.environ.get("PORT", 8050))
+    app.run(debug=False, host="0.0.0.0", port=puerto)
+
