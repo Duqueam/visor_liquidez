@@ -299,6 +299,7 @@ app.layout = html.Div(
         barra_leyenda,
         dcc.Store(id='memoria-datos'),
         dcc.Store(id='velas-cliente'),
+        dcc.Store(id='libro-cliente'),
         dcc.Graph(
             id='grafico-liquidez',
             style=dict(height='73vh'),
@@ -359,9 +360,11 @@ def alinear_a_vela(ts_ms, temporalidad):
      Input('selector-rango', 'value'),
      Input('selector-capa', 'value'),
      Input('intervalo-actualizacion', 'n_intervals'),
-     Input('velas-cliente', 'data')]
+     Input('velas-cliente', 'data'),
+     Input('libro-cliente', 'data')
+    ]
 )
-def obtener_datos(simbolo, temporalidad, rango_prof, modo_capa, n, velas):
+def obtener_datos(simbolo, temporalidad, rango_prof, modo_capa, n, velas, libro):
     headers = {"Accept": "application/json"}
     moneda_base = simbolo.replace("USDT", "")
     etiqueta_rango = "Libro Completo" if rango_prof >= 1.0 else f"±{int(rango_prof * 100)}%"
@@ -386,10 +389,11 @@ def obtener_datos(simbolo, temporalidad, rango_prof, modo_capa, n, velas):
         df = df.assign(delta=df.taker_quote - (df.qav - df.taker_quote))
         precio_actual = float(df.close.iloc[-1])
 
-        bids_dict = libro_vivo.get(simbolo, {}).get('bids', {})
-        asks_dict = libro_vivo.get(simbolo, {}).get('asks', {})
-        bids = pd.DataFrame(list(bids_dict.items()), columns=['price', 'qty']) if bids_dict else pd.DataFrame(columns=['price', 'qty'])
-        asks = pd.DataFrame(list(asks_dict.items()), columns=['price', 'qty']) if asks_dict else pd.DataFrame(columns=['price', 'qty'])
+        if not isinstance(libro, dict) or 'bids' not in libro:
+            from dash import no_update
+            return (no_update,) * 16
+        bids = pd.DataFrame(libro.get('bids', []), columns=['price', 'qty']).astype(float)
+        asks = pd.DataFrame(libro.get('asks', []), columns=['price', 'qty']).astype(float)
 
         bids = bids.assign(usdt=bids.price * bids.qty)
         asks = asks.assign(usdt=asks.price * asks.qty)
@@ -837,30 +841,36 @@ app.clientside_callback(
 app.clientside_callback(
     """
     async function(simbolo, tf, n) {
-        if (!simbolo || !tf) return window.dash_clientside.no_update;
-        window._ultimaCarga = window._ultimaCarga || {};
+        if (!simbolo || !tf) return [window.dash_clientside.no_update, window.dash_clientside.no_update];
+        window._ultimaVelas = window._ultimaVelas || {};
         const clave = simbolo + '_' + tf;
         const ahora = Date.now();
-        if (window._ultimaCarga[clave] && (ahora - window._ultimaCarga[clave]) < 60000) {
-            return window.dash_clientside.no_update;
-        }
+        let velasOut = window.dash_clientside.no_update;
+        let libroOut = window.dash_clientside.no_update;
         try {
-            const url = 'https:' + '//fapi.binance.com/fapi/v1/klines?symbol=' + simbolo + '&interval=' + tf + '&limit=1000';
-            const resp = await fetch(url);
-            const data = await resp.json();
-            if (Array.isArray(data) && data.length > 0) {
-                window._ultimaCarga[clave] = ahora;
-                return data;
+            if (!window._ultimaVelas[clave] || (ahora - window._ultimaVelas[clave]) >= 60000) {
+                const uV = 'https:' + '//fapi.binance.com/fapi/v1/klines?symbol=' + simbolo + '&interval=' + tf + '&limit=1000';
+                const dV = await (await fetch(uV)).json();
+                if (Array.isArray(dV) && dV.length > 0) {
+                    window._ultimaVelas[clave] = ahora;
+                    velasOut = dV;
+                }
+            }
+            const uL = 'https:' + '//fapi.binance.com/fapi/v1/depth?symbol=' + simbolo + '&limit=500';
+            const dL = await (await fetch(uL)).json();
+            if (dL && Array.isArray(dL.bids) && dL.bids.length > 0) {
+                libroOut = dL;
             }
         } catch (e) {}
-        return window.dash_clientside.no_update;
+        return [velasOut, libroOut];
     }
     """,
-    Output('velas-cliente', 'data'),
+    [Output('velas-cliente', 'data'),
+     Output('libro-cliente', 'data')],
     [Input('selector-moneda', 'value'),
      Input('selector-tf', 'value'),
      Input('intervalo-actualizacion', 'n_intervals')]
-          )
+)
 
 import os
 
