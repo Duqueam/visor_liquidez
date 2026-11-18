@@ -854,20 +854,24 @@ app.clientside_callback(
 )
 app.clientside_callback(
     """
-    function(n) {
+    function(fig) {
         window._vivo = window._vivo || {
             liq: {HYPEUSDT: [], BTCUSDT: [], ETHUSDT: [], SOLUSDT: []},
             bombas: {HYPEUSDT: [], BTCUSDT: [], ETHUSDT: [], SOLUSDT: []},
-            buf: {}
+            buf: {},
+            estado: 'Conectando...'
         };
-        const UMB_B = {HYPEUSDT: 10000, BTCUSDT: 120000, ETHUSDT: 60000, SOLUSDT: 30000};
-        const UMB_L = {HYPEUSDT: 1000, BTCUSDT: 5000, ETHUSDT: 3000, SOLUSDT: 2000};
+        const UMB_B = {HYPEUSDT: 5000, BTCUSDT: 25000, ETHUSDT: 15000, SOLUSDT: 10000};
+        const UMB_L = {HYPEUSDT: 500, BTCUSDT: 2000, ETHUSDT: 1500, SOLUSDT: 1000};
 
         if (!window._wsClienteOK) {
             window._wsClienteOK = true;
             const streams = ['!forceOrder@arr', 'hypeusdt@aggTrade', 'btcusdt@aggTrade', 'ethusdt@aggTrade', 'solusdt@aggTrade'].join('/');
             function conectar() {
-                const ws = new WebSocket('wss://://binance.com' + streams);
+                const urlWs = 'wss:' + '//fstream.binance.com/stream?streams=' + streams;
+                const ws = new WebSocket(urlWs);
+                ws.onopen = function() { window._vivo.estado = 'WS Vivo'; };
+                ws.onerror = function() { window._vivo.estado = 'Error WS'; };
                 ws.onmessage = function(ev) {
                     try {
                         const msg = JSON.parse(ev.data);
@@ -876,7 +880,7 @@ app.clientside_callback(
                             const o = d.o, sim = o.s;
                             if (window._vivo.liq[sim]) {
                                 const p = parseFloat(o.ap || o.p || 0), usdt = p * parseFloat(o.q || 0);
-                                if (usdt >= (UMB_L[sim] || 2000)) {
+                                if (usdt >= (UMB_L[sim] || 1000)) {
                                     window._vivo.liq[sim].push({ts: o.T || Date.now(), price: p, usdt: usdt, esShort: o.S === 'BUY'});
                                     if (window._vivo.liq[sim].length > 150) window._vivo.liq[sim].shift();
                                 }
@@ -889,7 +893,7 @@ app.clientside_callback(
                                 window._vivo.buf[sim] = window._vivo.buf[sim] || {w: win, buy: 0, sell: 0, p: p};
                                 const b = window._vivo.buf[sim];
                                 if (b.w !== win) {
-                                    const umb = UMB_B[sim] || 25000;
+                                    const umb = UMB_B[sim] || 10000;
                                     if (b.buy >= umb) window._vivo.bombas[sim].push({ts: b.w * 3000, price: b.p, usdt: b.buy, tipo: 'COMPRA'});
                                     if (b.sell >= umb) window._vivo.bombas[sim].push({ts: b.w * 3000, price: b.p, usdt: b.sell, tipo: 'VENTA'});
                                     if (window._vivo.bombas[sim].length > 100) window._vivo.bombas[sim].shift();
@@ -901,7 +905,7 @@ app.clientside_callback(
                         }
                     } catch (e) {}
                 };
-                ws.onclose = function() { setTimeout(conectar, 2000); };
+                ws.onclose = function() { window._vivo.estado = 'Reconectando'; setTimeout(conectar, 2000); };
             }
             conectar();
         }
@@ -930,7 +934,7 @@ app.clientside_callback(
             if (tv >= tMin) {
                 bX.push(tv); bY.push(b.price);
                 bC.push(b.tipo === 'COMPRA' ? 'rgba(0,230,118,0.85)' : 'rgba(255,23,68,0.85)');
-                bS.push(Math.min(Math.max((b.usdt / UMB_B[sim]) * 15, 16), 40));
+                bS.push(Math.min(Math.max((b.usdt / UMB_B[sim]) * 14, 15), 38));
                 bT.push(`● BOMBA ${b.tipo} (3s)<br>Vol: ${fmt(b.usdt)} | Precio: ${b.price.toFixed(3)}`);
             }
         });
@@ -946,12 +950,15 @@ app.clientside_callback(
             }
         });
 
-        Plotly.restyle(gd, {x: [bX, lX], y: [bY, lY], text: [bT, lT], 'marker.color': [bC, lC], 'marker.size': [bS, lS]}, Array.of(2, 3));
-        return '';
+        setTimeout(() => {
+            Plotly.restyle(gd, {x: [bX, lX], y: [bY, lY], text: [bT, lT], 'marker.color': [bC, lC], 'marker.size': [bS, lS]}, Array.of(2, 3));
+        }, 150);
+
+        return `● ${window._vivo.estado} | Bombas: ${bX.length} · Liq: ${lX.length}`;
     }
     """,
-    Output('t1-sub', 'title'),
-    Input('intervalo-actualizacion', 'n_intervals')
+    Output('t1-sub', 'children'),
+    Input('grafico-liquidez', 'figure')
 )
 
 import os
