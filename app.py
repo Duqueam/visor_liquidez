@@ -829,7 +829,7 @@ app.clientside_callback(
         let velasOut = window.dash_clientside.no_update;
         let libroOut = window.dash_clientside.no_update;
         try {
-            if (!window._ultimaVelas[clave] || (ahora - window._ultimaVelas[clave]) >= 60000) {
+            if (!window._ultimaVelas[clave] || (ahora - window._ultimaVelas[clave]) >= 10000) {
                 const uV = 'https:' + '//fapi.binance.com/fapi/v1/klines?symbol=' + simbolo + '&interval=' + tf + '&limit=1000';
                 const dV = await (await fetch(uV)).json();
                 if (Array.isArray(dV) && dV.length > 0) {
@@ -854,7 +854,7 @@ app.clientside_callback(
 )
 app.clientside_callback(
     """
-    function(fig) {
+    function(fig, n) {
         window._vivo = window._vivo || {
             liq: {HYPEUSDT: [], BTCUSDT: [], ETHUSDT: [], SOLUSDT: []},
             bombas: {HYPEUSDT: [], BTCUSDT: [], ETHUSDT: [], SOLUSDT: []},
@@ -954,11 +954,14 @@ app.clientside_callback(
             Plotly.restyle(gd, {x: [bX, lX], y: [bY, lY], text: [bT, lT], 'marker.color': [bC, lC], 'marker.size': [bS, lS]}, Array.of(2, 3));
         }, 150);
 
-        return `● ${window._vivo.estado} | Bombas: ${bX.length} · Liq: ${lX.length}`;
+               const totB = (window._vivo.bombas[sim] || []).length;
+        const totL = (window._vivo.liq[sim] || []).length;
+        return `● ${window._vivo.estado} | Bombas: ${totB} (${bX.length}) · Liq: ${totL} (${lX.length})`;
     }
     """,
     Output('t1-sub', 'children'),
-    Input('grafico-liquidez', 'figure')
+    [Input('grafico-liquidez', 'figure'),
+     Input('intervalo-actualizacion', 'n_intervals')]
 )
 
 import os
