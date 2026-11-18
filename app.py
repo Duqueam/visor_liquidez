@@ -102,7 +102,7 @@ def iniciar_websocket_binance():
                     if es_venta_agresiva:
                         buf['sell_usdt'] += usdt
                     else:
-                        buf['buy_usdt'] += usdt.
+                        buf['buy_usdt'] += usdt
             elif '@depth' in stream:
                 simbolo = data.get('s', '')
                 if simbolo in PARES:
