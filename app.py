@@ -41,7 +41,7 @@ def iniciar_websocket_binance():
     ws_iniciado = True
 
     streams = ["!forceOrder@arr"] + [f"{p.lower()}@aggTrade" for p in PARES]
-    url = "wss://://binance.com" + "/".join(streams)
+    url = "wss"+"://fstream.binance.com/stream?streams="+"/".join(streams)
 
     def on_message(ws, message):
         try:
@@ -349,7 +349,7 @@ def obtener_datos(simbolo, temporalidad, rango_prof, modo_capa, n):
     etiqueta_rango = "Libro Completo" if rango_prof >= 1.0 else f"±{int(rango_prof * 100)}%"
 
     try:
-        base = "https://binance.com"
+        base = "https://" + "fapi.binance.com"
         velas = requests.get(
             base + "/fapi/v1/klines",
             params=dict(symbol=simbolo, interval=temporalidad, limit=500),
