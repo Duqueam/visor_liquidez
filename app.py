@@ -393,6 +393,8 @@ def obtener_datos(simbolo, temporalidad, rango_prof, modo_capa, n, velas):
 
         bids = bids.assign(usdt=bids.price * bids.qty)
         asks = asks.assign(usdt=asks.price * asks.qty)
+        bids['usdt'] = pd.to_numeric(bids['usdt'], errors='coerce').fillna(0.0)
+        asks['usdt'] = pd.to_numeric(asks['usdt'], errors='coerce').fillna(0.0)
 
         mejor_compra = float(bids.price.max()) if not bids.empty else precio_actual
         mejor_venta = float(asks.price.min()) if not asks.empty else precio_actual
