@@ -356,7 +356,11 @@ def obtener_datos(simbolo, temporalidad, rango_prof, modo_capa, n):
             headers=headers,
             timeout=8
         ).json()
-
+        if not isinstance(velas, list) or len(velas) == 0:
+            print("RESPUESTA DE BINANCE:", velas, "SIMBOLO:", simbolo)
+            from dash import no_update
+            return (no_update,) * 16
+            
         cols = ('time', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'qav', 'num_trades', 'taker_base', 'taker_quote', 'ignore')
         df = pd.DataFrame(velas, columns=cols)
         df = df.assign(
