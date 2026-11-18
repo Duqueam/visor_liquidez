@@ -852,6 +852,107 @@ app.clientside_callback(
      Input('selector-tf', 'value'),
      Input('intervalo-actualizacion', 'n_intervals')]
 )
+app.clientside_callback(
+    """
+    function(n) {
+        window._vivo = window._vivo || {
+            liq: {HYPEUSDT: [], BTCUSDT: [], ETHUSDT: [], SOLUSDT: []},
+            bombas: {HYPEUSDT: [], BTCUSDT: [], ETHUSDT: [], SOLUSDT: []},
+            buf: {}
+        };
+        const UMB_B = {HYPEUSDT: 10000, BTCUSDT: 120000, ETHUSDT: 60000, SOLUSDT: 30000};
+        const UMB_L = {HYPEUSDT: 1000, BTCUSDT: 5000, ETHUSDT: 3000, SOLUSDT: 2000};
+
+        if (!window._wsClienteOK) {
+            window._wsClienteOK = true;
+            const streams = ['!forceOrder@arr', 'hypeusdt@aggTrade', 'btcusdt@aggTrade', 'ethusdt@aggTrade', 'solusdt@aggTrade'].join('/');
+            function conectar() {
+                const ws = new WebSocket('wss://://binance.com' + streams);
+                ws.onmessage = function(ev) {
+                    try {
+                        const msg = JSON.parse(ev.data);
+                        const st = msg.stream || '', d = msg.data || {};
+                        if (st === '!forceOrder@arr' && d.o) {
+                            const o = d.o, sim = o.s;
+                            if (window._vivo.liq[sim]) {
+                                const p = parseFloat(o.ap || o.p || 0), usdt = p * parseFloat(o.q || 0);
+                                if (usdt >= (UMB_L[sim] || 2000)) {
+                                    window._vivo.liq[sim].push({ts: o.T || Date.now(), price: p, usdt: usdt, esShort: o.S === 'BUY'});
+                                    if (window._vivo.liq[sim].length > 150) window._vivo.liq[sim].shift();
+                                }
+                            }
+                        } else if (st.includes('@aggTrade')) {
+                            const sim = d.s;
+                            if (window._vivo.bombas[sim]) {
+                                const p = parseFloat(d.p || 0), usdt = p * parseFloat(d.q || 0);
+                                const win = Math.floor((d.T || Date.now()) / 3000);
+                                window._vivo.buf[sim] = window._vivo.buf[sim] || {w: win, buy: 0, sell: 0, p: p};
+                                const b = window._vivo.buf[sim];
+                                if (b.w !== win) {
+                                    const umb = UMB_B[sim] || 25000;
+                                    if (b.buy >= umb) window._vivo.bombas[sim].push({ts: b.w * 3000, price: b.p, usdt: b.buy, tipo: 'COMPRA'});
+                                    if (b.sell >= umb) window._vivo.bombas[sim].push({ts: b.w * 3000, price: b.p, usdt: b.sell, tipo: 'VENTA'});
+                                    if (window._vivo.bombas[sim].length > 100) window._vivo.bombas[sim].shift();
+                                    b.w = win; b.buy = 0; b.sell = 0;
+                                }
+                                b.p = p;
+                                if (d.m === true) b.sell += usdt; else b.buy += usdt;
+                            }
+                        }
+                    } catch (e) {}
+                };
+                ws.onclose = function() { setTimeout(conectar, 2000); };
+            }
+            conectar();
+        }
+
+        const gd = document.querySelector('#grafico-liquidez .js-plotly-plot');
+        if (!gd || !gd.data || gd.data.length < 4) return window.dash_clientside.no_update;
+
+        const tit = (gd.layout && gd.layout.title && gd.layout.title.text) || '';
+        const sim = tit.startsWith('HYPE') ? 'HYPEUSDT' : (tit.startsWith('BTC') ? 'BTCUSDT' : (tit.startsWith('ETH') ? 'ETHUSDT' : 'SOLUSDT'));
+        const tf = tit.includes('1M ') ? '1m' : (tit.includes('5M ') ? '5m' : (tit.includes('15M ') ? '15m' : (tit.includes('1H ') ? '1h' : (tit.includes('4H ') ? '4h' : '1d'))));
+        const step = {'1m': 60000, '5m': 300000, '15m': 900000, '1h': 3600000, '4h': 14400000, '1d': 86400000}[tf] || 60000;
+
+        const velasX = gd.data.at(0).x || [];
+        if (velasX.length === 0) return window.dash_clientside.no_update;
+        const tMin = velasX.at(0), tMax = velasX.at(-1);
+
+        const aStr = ms => {
+            const d = new Date(Math.floor(ms / step) * step), p = x => String(x).padStart(2, '0');
+            return `${d.getUTCFullYear()}-${p(d.getUTCMonth()+1)}-${p(d.getUTCDate())} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}`;
+        };
+        const fmt = v => v >= 1e6 ? (v/1e6).toFixed(2)+'M' : (v >= 1e3 ? (v/1e3).toFixed(1)+'K' : v.toFixed(0));
+
+        let bX=[], bY=[], bC=[], bS=[], bT=[];
+        (window._vivo.bombas[sim] || []).forEach(b => {
+            let tv = aStr(b.ts); if (tv > tMax) tv = tMax;
+            if (tv >= tMin) {
+                bX.push(tv); bY.push(b.price);
+                bC.push(b.tipo === 'COMPRA' ? 'rgba(0,230,118,0.85)' : 'rgba(255,23,68,0.85)');
+                bS.push(Math.min(Math.max((b.usdt / UMB_B[sim]) * 15, 16), 40));
+                bT.push(`● BOMBA ${b.tipo} (3s)<br>Vol: ${fmt(b.usdt)} | Precio: ${b.price.toFixed(3)}`);
+            }
+        });
+
+        let lX=[], lY=[], lC=[], lS=[], lT=[];
+        (window._vivo.liq[sim] || []).forEach(l => {
+            let tv = aStr(l.ts); if (tv > tMax) tv = tMax;
+            if (tv >= tMin) {
+                lX.push(tv); lY.push(l.price);
+                lC.push(l.esShort ? '#00e5ff' : '#ffab00');
+                lS.push(Math.min(Math.max((l.usdt / UMB_L[sim]) * 10, 12), 28));
+                lT.push(`◆ ${l.esShort ? 'Liq Short' : 'Liq Long'}<br>Monto: ${fmt(l.usdt)} | Precio: ${l.price.toFixed(3)}`);
+            }
+        });
+
+        Plotly.restyle(gd, {x: [bX, lX], y: [bY, lY], text: [bT, lT], 'marker.color': [bC, lC], 'marker.size': [bS, lS]}, Array.of(2, 3));
+        return '';
+    }
+    """,
+    Output('t1-sub', 'title'),
+    Input('intervalo-actualizacion', 'n_intervals')
+)
 
 import os
 
