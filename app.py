@@ -298,6 +298,7 @@ app.layout = html.Div(
         panel_tarjetas,
         barra_leyenda,
         dcc.Store(id='memoria-datos'),
+        dcc.Store(id='velas-cliente'),
         dcc.Graph(
             id='grafico-liquidez',
             style=dict(height='73vh'),
@@ -357,40 +358,19 @@ def alinear_a_vela(ts_ms, temporalidad):
      Input('selector-tf', 'value'),
      Input('selector-rango', 'value'),
      Input('selector-capa', 'value'),
-     Input('intervalo-actualizacion', 'n_intervals')]
+     Input('intervalo-actualizacion', 'n_intervals')
+     Input('velas-cliente', 'data')]
 )
-def obtener_datos(simbolo, temporalidad, rango_prof, modo_capa, n):
+def obtener_datos(simbolo, temporalidad, rango_prof, modo_capa, n, velas):
     headers = {"Accept": "application/json"}
     moneda_base = simbolo.replace("USDT", "")
     etiqueta_rango = "Libro Completo" if rango_prof >= 1.0 else f"±{int(rango_prof * 100)}%"
 
     try:
-        clave_cache = f"{simbolo}_{temporalidad}"
-        ahora = time.time()
-        if clave_cache in velas_cache and (ahora - velas_cache[clave_cache]['ts']) < 60:
-            velas = velas_cache[clave_cache]['data']
-        else:
-            velas = None
-            for sub in ("fapi1.binance.com", "fapi2.binance.com", "fapi3.binance.com", "fapi.binance.com"):
-                try:
-                    resp = requests.get(
-                        f"https://{sub}/fapi/v1/klines",
-                        params=dict(symbol=simbolo, interval=temporalidad, limit=200),
-                        headers=headers,
-                        timeout=6
-                    ).json()
-                    if isinstance(resp, list) and len(resp) > 0:
-                        velas = resp
-                        velas_cache[clave_cache] = {'ts': ahora, 'data': velas}
-                        break
-                except Exception:
-                    continue
-
         if not isinstance(velas, list) or len(velas) == 0:
-            print("NO SE PUDIERON CARGAR VELAS PARA:", simbolo)
-            from dash import no_update
-            return (no_update,) * 16
-            
+        from dash import no_update
+        return (no_update,) * 16
+
         cols = ('time', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'qav', 'num_trades', 'taker_base', 'taker_quote', 'ignore')
         df = pd.DataFrame(velas, columns=cols)
         df = df.assign(
@@ -852,7 +832,33 @@ app.clientside_callback(
     Input('memoria-datos', 'data'),
     Input('grafico-liquidez', 'figure')
 )
-
+app.clientside_callback(
+    """
+    async function(simbolo, tf, n) {
+        if (!simbolo || !tf) return window.dash_clientside.no_update;
+        window._ultimaCarga = window._ultimaCarga || {};
+        const clave = simbolo + '_' + tf;
+        const ahora = Date.now();
+        if (window._ultimaCarga[clave] && (ahora - window._ultimaCarga[clave]) < 60000) {
+            return window.dash_clientside.no_update;
+        }
+        try {
+            const url = 'https:' + '//fapi.binance.com/fapi/v1/klines?symbol=' + simbolo + '&interval=' + tf + '&limit=1000';
+            const resp = await fetch(url);
+            const data = await resp.json();
+            if (Array.isArray(data) && data.length > 0) {
+                window._ultimaCarga[clave] = ahora;
+                return data;
+            }
+        } catch (e) {}
+        return window.dash_clientside.no_update;
+    }
+    """,
+    Output('velas-cliente', 'data'),
+    [Input('selector-moneda', 'value'),
+     Input('selector-tf', 'value'),
+     Input('intervalo-actualizacion', 'n_intervals')]
+          )
 
 import os
 
