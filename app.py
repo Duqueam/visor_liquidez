@@ -358,7 +358,7 @@ def alinear_a_vela(ts_ms, temporalidad):
      Input('selector-tf', 'value'),
      Input('selector-rango', 'value'),
      Input('selector-capa', 'value'),
-     Input('intervalo-actualizacion', 'n_intervals')
+     Input('intervalo-actualizacion', 'n_intervals'),
      Input('velas-cliente', 'data')]
 )
 def obtener_datos(simbolo, temporalidad, rango_prof, modo_capa, n, velas):
